@@ -16,9 +16,6 @@ from sklearn import tree
 from sklearn.metrics import accuracy_score
 from sklearn.tree import DecisionTreeClassifier
 
-from minecraft_ai.mc_types import Action
-
-
 def fit_tree(states, actions):
     """
     fits a random forest model to the action outputs of a policy
@@ -55,18 +52,17 @@ def build_inference_module(
         if node["is_leaf"]:
             print(node.keys())
             body = f"""
-scoreboard players set @s action {Action[node['prediction']].value}
+scoreboard players set @s action {node['prediction']}
 """
 
         else:
             body = f"""
 # prepare scores for comparison
 execute store result score #tmp action run data get storage ai {node['feature']} 100000
-scoreboard players set #threshdold action {round(node['threshold'] * 100000)}
 
 # branch decisions
 # if
-execute if score #tmp action {node['op']} #threshold action run return run function ai:ai_modules/{module_name}/{entity_name}/inference/node_{node['left']['id']}
+execute if score #tmp action {node['op'].format(value=round(node['threshold'] * 100000))} run return run function ai:ai_modules/{module_name}/{entity_name}/inference/node_{node['left']['id']}
 # else
 function ai:ai_modules/{module_name}/{entity_name}/inference/node_{node['right']['id']}
 """
@@ -106,10 +102,10 @@ def tree_to_dict(dt_model, target_names, feature_names=None):
             else:
                 feature = tree.feature[node_id]
         if "=" in feature:
-            rule_type = "="
+            rule_type = "matches {value}"
             rule_value = "false"
         else:
-            rule_type = "<="
+            rule_type = "matches ..{value}"
             rule_value = tree.threshold[node_id]
 
         return {"id": int(node_id), "is_leaf": is_leaf, "feature": feature, "op": rule_type, "threshold": rule_value}
@@ -136,14 +132,16 @@ if __name__ == '__main__':
     module_name = "test"
     entity_name = "test"
 
+    actions = ["sprint", "jump", "rotate"]
+
     states, actions = make_classification(n_samples=1000, n_features=16,
                            n_informative=8, n_redundant=0,
-                           n_classes=len(Action),
+                           n_classes=len(actions),
                            random_state=0, shuffle=False)
 
     tr = fit_tree(states, actions)
     fn = list("abcdefghijklmnop")
-    cn = [act.name for act in Action]
+    cn = [i for i in range(len(actions))]
 
     d = tree_to_dict(tr, cn, fn)
     print(d)
