@@ -9,9 +9,9 @@ from polaris.environments import PolarisEnv
 from gymnasium.spaces import Discrete, Box
 import numpy as np
 
-from minecraft_ai.arena import Arena
-from minecraft_ai.mc_types import MobConfig, load_mob
-from minecraft_ai.mob import Mob
+from mc_ai.arena import Arena
+from mc_ai.mc_types import MobConfig, load_mob
+from mc_ai.mob import Mob
 
 
 class MiniMinecraft(PolarisEnv):
@@ -24,7 +24,10 @@ class MiniMinecraft(PolarisEnv):
             layout: str,
             env_index: int = -1,
             tick_skip: int = 1,
-            render: bool = False,
+            render: bool = True,
+            record_raw_observations=False,
+            random_raw_observations=False,
+            raw_position_offset=(0, 0, 0),
             **kwargs
     ):
         # uses the player's dynamics to learn a bot
@@ -32,18 +35,22 @@ class MiniMinecraft(PolarisEnv):
         self.arena = Arena(layout)
         self.tick_skip = tick_skip
 
+        if not isinstance(attackers[0], MobConfig):
+            attackers = [MobConfig(*args) for args in attackers]
+            defenders = [MobConfig(*args) for args in defenders]
+
         self.attackers = {mob.name: mob for mob in attackers}
         self.defenders = {mob.name: mob for mob in defenders}
 
         self.allies = {
-            mob_name: [ally for ally in group.values() if ally.name != mob_name]
+            mob_name: [ally for ally in group if ally != mob_name]
             for group in (self.attackers, self.defenders)
             for mob_name in group
         }
 
         self.opponents = {
             mob_name: [opponent for opponent in
-                       (self.defenders if group is self.attackers else self.attackers).values()]
+                       (self.defenders if group is self.attackers else self.attackers)]
             for group in (self.attackers, self.defenders)
             for mob_name in group
         }
@@ -54,17 +61,22 @@ class MiniMinecraft(PolarisEnv):
         if len(self._agent_ids) < len(self.attackers) + len(self.defenders):
             raise ValueError("Conflicting mob names.")
 
-        self._render = render
+        self.should_render = render
         self.num_players = len(self._agent_ids)
-        self.episode_length = 2048
+        self.episode_length = 4096
         self.step_count = 0
         self.num_episodes = 0
-        self.render_freq = 30
+        self.render_freq = 100
         self.env_index = env_index
+        self.record_raw_observations = record_raw_observations
+        self.random_raw_observations = random_raw_observations
+        self.raw_position_offset = raw_position_offset
+
+        self.observation_paths = None
 
         self.reset()
-        self.observation_space = {aid: mob.observation_space(self.mobs) for aid, mob in self.mobs.items()}
-        self.action_space = {aid: mob.action_space() for aid, mob in self.mobs.items()}
+
+
 
     def reset(
         self,
@@ -74,15 +86,15 @@ class MiniMinecraft(PolarisEnv):
     ):
 
         if self.num_episodes % self.render_freq == 0 and self.env_index == 0:
-            self._render = True
+            self._render = self.should_render
         else:
             self._render = False
 
-        self.episode_length = 512 if self._render else 2048
+        self.episode_length = 512 if self._render else 4096
         self.num_episodes += 1
         self.step_count = 0
 
-        self.metrics = defaultdict(float)
+        self.metrics = {}
 
         self.mobs = {}
         for attacker in self.attackers.values():
@@ -90,23 +102,83 @@ class MiniMinecraft(PolarisEnv):
         for defender in self.defenders.values():
             self.mobs[defender.name] = load_mob(defender)
 
-        for i, (aid, player) in enumerate(self.mobs.items()):
-            x, y, z = self.arena.center
-            player.init_at(x, y+0.1, z)
+        for i, (aid, mob) in enumerate(self.mobs.items()):
+            pos = self.arena.sample_start_pos(mob)
+            mob.move(*pos)
+
+        if self.record_raw_observations:
+            if self.observation_paths is None:
+                self.observation_paths = {
+                    aid: self.get_raw_obs(aid)
+                    for aid in self.attackers
+                }
+
+            self.metrics["observation_paths"] = self.observation_paths
+            self.metrics["raw_observations"] = {
+                aid: []
+                for aid in self.attackers
+            }
+            self.metrics["actions"] = {
+                aid: []
+                for aid in self.attackers
+            }
+
+        self.observation_space = {aid: Box(-3., 3., self.get_obs(aid).shape) for aid, mob in self.mobs.items()}
+        self.action_space = {aid: mob.action_space() for aid, mob in self.mobs.items()}
 
         self.render()
         return {aid: self.get_obs(aid) for aid in self.get_agent_ids()}, {aid: {} for aid in self.get_agent_ids()}
 
+    def get_raw_obs(self, aid):
+        nearest_opponent = self.get_nearest_opponent(aid)
+        observations = self.mobs[aid].observe_raw(arena=self.arena, nearest_opponent=nearest_opponent, position_offset=self.raw_position_offset)
+        # only get info about nearest opponent
+        for ally in self.allies[aid]:
+            observations.update(self.mobs[ally].observe_raw(arena=self.arena, position_offset=self.raw_position_offset, observe_private=False))
+
+        observations.update(nearest_opponent.observe_raw(arena=self.arena, position_offset=self.raw_position_offset, observe_private=False))
+
+        return observations
+
+    def sample_random_obs(self, aid, size=(1,)):
+        nearest_opponent = self.get_nearest_opponent(aid)
+        observations, raw_observations = self.mobs[aid].sample_obs(arena=self.arena, position_offset=self.raw_position_offset, size=size)
+        # only get info about nearest opponent
+        for ally in self.allies[aid]:
+            obs, raw = self.mobs[ally].sample_obs(arena=self.arena, position_offset=self.raw_position_offset, size=size, observe_private=False)
+            observations.extend(obs)
+            raw_observations.update(raw)
+
+        obs, raw = nearest_opponent.sample_obs(arena=self.arena, position_offset=self.raw_position_offset, size=size, observe_private=False)
+        observations.extend(obs)
+        raw_observations.update(raw)
+
+        return observations, raw_observations
+
+    def get_nearest_opponent(self, aid):
+
+        nearest = None
+        d = np.inf
+
+        for opponent in self.opponents[aid]:
+            mob = self.mobs[opponent]
+            nd = self.mobs[aid].distance(mob)
+            if nd < d:
+                nearest = mob
+                d = nd
+        return nearest
+
     def get_obs(self, aid):
+        nearest_opponent = self.get_nearest_opponent(aid)
+        observations = self.mobs[aid].observe(arena=self.arena, nearest_opponent=nearest_opponent)
 
-        observations = self.mobs[aid].observe()
+        # only get info about nearest opponent
+        for ally in self.allies[aid]:
+            observations.extend(self.mobs[ally].observe(arena=self.arena, observe_private=False))
 
-        for mob in self.mobs.values():
-            if mob.name == aid:
-                continue
-            observations.extend(mob.observe(observe_private=False))
+        observations.extend(nearest_opponent.observe(arena=self.arena, observe_private=False))
 
-        return np.clip(observations, self.observation_space[aid].low, self.observation_space[aid].high, dtype=np.float32)
+        return np.clip(observations, -3., 3., dtype=np.float32)
 
     def make_record(self):
         #with imageio.get_writer(f"mini_mc_movie.gif", mode="I", fps=2) as writer:
@@ -121,11 +193,23 @@ class MiniMinecraft(PolarisEnv):
             return
         self.arena.render(self.mobs)
 
-
     def step(
             self,
             actions: Dict[str, int]
     ):
+        if self.random_raw_observations and self.random_raw_observations:
+            for aid in self.attackers:
+                self.metrics["raw_observations"][aid].append([obs for obs in self.get_raw_obs(aid).values()])
+                self.metrics["actions"][aid].append(actions[aid])
+            self.step_count += 1
+            done = self.step_count == self.episode_length
+            dones =  {aid: done for aid in self.mobs}
+            dones["__all__"] = done
+            return ({aid: self.observation_space[aid].sample() for aid in self.mobs},
+                    {aid: 0. for aid in self.mobs},
+                    dones, dones,
+                    {aid: {} for aid in self.mobs})
+
         # 1: apply friction
         # 2: apply gravity
         # 3: actions
@@ -139,7 +223,9 @@ class MiniMinecraft(PolarisEnv):
                     mob.apply_gravity()
                 if _ == 0:
                     for aid, mob in self.mobs.items():
-                        mob.act(actions[aid], allies=self.allies[aid], opponents=self.opponents[aid], arena=self.arena)
+                        allies = [self.mobs[ally] for ally in self.allies[aid]]
+                        opponents = [self.mobs[opponent] for opponent in self.opponents[aid]]
+                        mob.act(actions[aid], allies=allies, opponents=opponents, arena=self.arena)
                 for mob in self.mobs.values():
                     mob.tick(self.arena)
                 self.step_count += 1
@@ -173,14 +259,20 @@ class MiniMinecraft(PolarisEnv):
         for aid, mob in self.mobs.items():
             r = - mob.actions[actions[aid]].cost - 100 * int(all_deaths[aid]) - damages[aid]
             for ally in self.allies[aid]:
-                r += - 100 * int(all_deaths[ally.name]) - damages[ally.name]
+                r += - 100 * int(all_deaths[ally]) - damages[ally]
             for opponent in self.opponents[aid]:
-                r += 100 * int(all_deaths[opponent.name]) + damages[opponent.name]
+                r += 100 * int(all_deaths[opponent]) + damages[opponent]
             rews[aid] = r
 
         obs = {
             aid: self.get_obs(aid) for aid in self.get_agent_ids()
         }
+        if self.record_raw_observations and not self.random_raw_observations:
+            for aid in self.attackers:
+                self.metrics["raw_observations"][aid].append([obs for obs in self.get_raw_obs(aid).values()])
+                self.metrics["actions"][aid].append(actions[aid])
+
+
         info = {
             aid: {} for aid in self.get_agent_ids()
         }
@@ -196,14 +288,14 @@ class MiniMinecraft(PolarisEnv):
 
 if __name__ == '__main__':
 
-    np.random.seed(40)
+    np.random.seed(1)
     repeat = 1
     skip = True
 
     attackers = [
         MobConfig(
             name="zombie1",
-            cls="minecraft_ai.mob.PlayerLike",
+            cls="mc_ai.mob.PlayerLike",
             config=dict(
                 position_offset=(1, 0, 1)
             )
@@ -213,7 +305,7 @@ if __name__ == '__main__':
     defenders = [
         MobConfig(
             name="player",
-            cls="minecraft_ai.mob.PlayerLike",
+            cls="mc_ai.mob.PlayerLike",
             config=dict(
                 position_offset=(-1, 0, -1)
             )
@@ -229,17 +321,24 @@ if __name__ == '__main__':
     )
 
     r = 1 if skip else repeat
-    n = 500
+    n = 200
     acts = {
-        0: [1]*9 + [9]*10,
-        1: [9] * 19,
+        "zombie1": [1] + [4] * 19,
+        "player": [9] * 20,
     }
-    n = len(acts[0])
+    n = len(acts["zombie1"])
 
     print(acts)
 
     vz = []
     pz = []
+    env.mobs["zombie1"].x = 5.5
+    env.mobs["zombie1"].y = 1.01
+    env.mobs["zombie1"].z = 5.5
+
+    env.mobs["player"].x = 7.5
+    env.mobs["player"].y = 1.01
+    env.mobs["player"].z = 3.5
 
     for t in range(n):
         actions = {

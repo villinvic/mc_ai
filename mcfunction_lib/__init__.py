@@ -1,2 +1,3 @@
-from decorators import action, toggle, observation, Observable, Controllable
-from mcfunction import mcfunction
+from .interfaces import Observable, Controllable
+from .decorators import action, toggle, observation
+from .compile import mcfunction

@@ -4,7 +4,7 @@ from typing import Tuple, List, NamedTuple, Callable, Dict, Any
 
 import numpy as np
 
-from mcfunction_lib.mcfunction import mcfunction
+from mcfunction_lib.compile import mcfunction
 
 class Constants:
     # global

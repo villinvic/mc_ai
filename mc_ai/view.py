@@ -2,7 +2,7 @@ import os
 
 import pyvista as pv
 import numpy as np
-from minecraft_ai.mc_types import Player
+from mc_ai.mob import Mob
 from typing import List, Dict
 
 class GameRenderer:
@@ -57,25 +57,23 @@ class GameRenderer:
         return path
 
 
-    def update_labels(self, i:int, player: Player):
+    def update_labels(self, i:int, mob: Mob):
         font_size = 20
 
         y_offset = i * font_size * 1.15
 
-        label = pv.Text(position=(10, y_offset), name=f"{player.aid}_label")
+        label = pv.Text(position=(10, y_offset), name=f"{mob.name}_label")
         label.prop.font_size = font_size
-        if player.aid not in self.player_labels:
+        if mob.name not in self.player_labels:
             self.pl.add_actor(label)
-            self.player_labels[player.aid] = label
+            self.player_labels[mob.name] = label
 
-        label_text = f"HP({player.aid}): {player.health}/{player.max_health}"
-        self.player_labels[player.aid].SetInput(label_text)
+        label_text = f"HP({mob.name}): {mob.health}/{mob.max_health}"
+        self.player_labels[mob.name].SetInput(label_text)
 
+    def update_scene(self, mobs: Dict[str, Mob]):
 
-
-    def update_scene(self, players: Dict[str, Player]):
-
-        for i, (aid, player) in enumerate(players.items()):
+        for i, (aid, player) in enumerate(mobs.items()):
             # Either reuse or load the zombie mesh
             if aid not in self.actor_map:
                 mesh = pv.read("data/entities/zombie.gltf")

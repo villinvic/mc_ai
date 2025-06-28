@@ -1,5 +1,3 @@
-
-import wandb
 from polaris.experience import EpisodeCallbacks
 
 from sacred import Experiment, Ingredient
@@ -42,18 +40,20 @@ def cfg():
         layout="arena_test",
         tick_skip=1,
         render=True,
+        record_raw_observations=True,
+        #random_raw_observations=True,
+        # TODO: this is simpler to manipulate the dataset, rather than the observations themselves
+        raw_position_offset=(0-5 , -60, 0-5) # position of the arena's center ingame minus arena dimension
     )
-    num_workers = 5
     policy_path = 'polaris.policies.PPO'
     model_path = 'mc_ai.models.basic'
     policy_class = 'PPO'
-    model_class = 'Basic' # BasicDeterministic
+    model_class = 'BasicDeterministic'
+    num_workers = 5
     trajectory_length = 256
     max_seq_len = 128
-    train_batch_size = 8192
-    max_queue_size = train_batch_size * 10
-    n_epochs=4
-    minibatch_size= train_batch_size//8
+    batch_size = 8192
+    compute_advantages_on_workers = True
 
     default_policy_config = {
         'discount': 0.99,
@@ -72,33 +72,33 @@ def cfg():
         'mlp_dims': [32, 32],
         }
 
+    attacking_policies = {
+        "zombie1": "agent"
+    }
+    defending_policies = {
+        "player": ["agent"]
+    }
+
+    random_defender_chance=1/3
+
     policy_params = [{
         "name": "agent",
         "config": default_policy_config,
         "options": {"aid": "zombie1"}
     }]
 
-    compute_advantages_on_workers = True
-    wandb_logdir = 'logs'
-    report_freq = 5
-    episode_metrics_smoothing = 0.95
-    training_metrics_smoothing = 0.8
+    dataset_path = f"data/policy_datasets/{exp_name}"
+    dataset_size = 500_000
 
-    # FSP
-    update_policy_history_freq = 50
-    policy_history_length = 5
-    history_update_end = 800
 
+    # dummy stuff
     checkpoint_config = dict(
         checkpoint_frequency=50,
         checkpoint_path=exp_path,
         stopping_condition={"environment_steps": 1e10},
         keep=4,
     )
-
     episode_callback_class = EpisodeCallbacks
-
-    restore = False
 
 
 @ex.automain
@@ -108,21 +108,10 @@ def main(_config):
     gpus = tf.config.experimental.list_physical_devices('GPU')
     for gpu in gpus:
         tf.config.experimental.set_memory_growth(gpu, False)
-    from fsp import FSP
+    from on_policy_dataset import DatasetBuilder
 
     config = ConfigDict(_config)
     MiniMinecraft(**config["env_config"]).register()
 
-
-    wandb.init(
-        config=_config,
-        project="mc",
-        mode='online',
-        group="test",
-        name=exp_name,
-        notes=None,
-        dir=config["wandb_logdir"]
-    )
-
-    trainer = FSP(config, restore=config.restore)
-    trainer.run()
+    builder = DatasetBuilder(config)
+    builder.run()

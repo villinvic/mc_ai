@@ -6,7 +6,7 @@ import threading
 import time
 from collections import defaultdict
 from copy import deepcopy
-from typing import Dict
+from typing import Dict, NamedTuple, List
 
 import numpy as np
 import polaris.experience.matchmaking
@@ -30,8 +30,6 @@ class FictitiousMatchmaking(MatchMaking):
         super().__init__(agent_ids=agent_ids)
         self.trainable_policies = trainable_policies
 
-        self.render_freq = 100
-        self.sampled = 0
 
     def next(
             self,
@@ -43,7 +41,8 @@ class FictitiousMatchmaking(MatchMaking):
 
         p1 = np.random.choice(self.trainable_policies)
         other = list(params_map.keys())
-        if wid == 0 or self.sampled % self.render_freq == 0:
+        other.remove(p1)
+        if len(other) == 0:
             p2 = p1
         else:
             p2 = np.random.choice(other)
@@ -51,19 +50,10 @@ class FictitiousMatchmaking(MatchMaking):
         sampled_policies = [p1, p2]
         #np.random.shuffle(sampled_policies)
 
-
         r = {
             aid: params_map[pid] for pid, aid in zip(sampled_policies, self.agent_ids)
         }
-        # for param in r.values():
-        #     if self.sampled % self.render_freq == 0 and self.sampled > 0:
-        #         param.options["render"] = True
-        #     else:
-        #         param.options["render"] = False
 
-        #print(self.sampled, param.options)
-
-        self.sampled += 1
         return r
 
 
@@ -107,8 +97,8 @@ class FSP(Checkpointable):
             self.policy_map: Dict[str, Policy] = {
                 policy_param.name: self.PolicyCls(
                     name=policy_param.name,
-                    action_space=self.env.action_space,
-                    observation_space=self.env.observation_space,
+                    action_space=self.env.action_space[policy_param.options["aid"]],
+                    observation_space=self.env.observation_space[policy_param.options["aid"]],
                     config=self.config,
                     policy_config=policy_param.config,
                     options=policy_param.options,
@@ -173,11 +163,11 @@ class FSP(Checkpointable):
                 GlobalCounter[GlobalCounter.ENV_STEPS] = self.metrics["counters/" + GlobalCounter.ENV_STEPS].get()
 
             for policy_name, params in self.params_map.items():
-
+                #params.config["entropy_cost"] = -1e-4
                 self.policy_map[policy_name] = self.PolicyCls(
                     name=policy_name,
-                    action_space=self.env.action_space,
-                    observation_space=self.env.observation_space,
+                    action_space=self.env.action_space[params.options["aid"]],
+                    observation_space=self.env.observation_space[params.options["aid"]],
                     config=self.config,
                     policy_config=params.config,
                     options=params.options,
@@ -213,8 +203,7 @@ class FSP(Checkpointable):
         env_steps = 0
 
         experience, self.running_experience_jobs = self.worker_set.wait(self.params_map, self.running_experience_jobs, timeout=1e-2)
-        if len(experience)>0:
-            print("collected ", len(experience), "experiences")
+
 
         enqueue_time_start = time.time()
         num_batch = 0
@@ -268,6 +257,7 @@ class FSP(Checkpointable):
 
         t.append(time.time())
         training_metrics = {}
+
         for policy_name, policy_queue in self.experience_queue.items():
             if policy_queue.is_ready():
                 pulled_batch = policy_queue.pull(self.config.train_batch_size)
@@ -284,7 +274,7 @@ class FSP(Checkpointable):
                 params = self.policy_map[policy_name].get_params()
                 self.params_map[policy_name] = params
 
-                if params.version == 2 or params.version % self.config.update_policy_history_freq == 0:
+                if params.version < self.config.history_update_end and (params.version == 20 or params.version % self.config.update_policy_history_freq == 0):
                     pid = f"{policy_name}_version_{params.version}"
                     new_params = PolicyParams(
                         name=pid,

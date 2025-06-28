@@ -1,6 +1,22 @@
-[build-system]
-requires = [
-    "setuptools>=42",
-    "wheel"
+[project]
+name = "mc-ai"
+version = "0.1.0"
+description = "Minecraft AI system with mcfunction generation and reinforcement learning"
+authors = [{ name = "Victor Villin", email = "victor.villin@unine.ch" }]
+requires-python = ">=3.10"
+dependencies = [
+  "dm-sonnet",
+  "dm-tree"
 ]
-build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["mcfunction_lib", "mc_ai"]
+
+[build-system]
+requires = ["setuptools>=61.0"]
+
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: OS Independent"
+]
